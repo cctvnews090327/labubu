@@ -14,6 +14,7 @@ local state = {
     alive = true,
     highlightsOn = false,
     healthOn = false,
+    reconcileInterval = 0.5,
     connections = {},
     watchers = {},
     visuals = {},
@@ -514,6 +515,15 @@ track(Players.PlayerRemoving:Connect(unwatchPlayer))
 for _, otherPlayer in ipairs(Players:GetPlayers()) do
     watchPlayer(otherPlayer)
 end
+
+task.spawn(function()
+    while state.alive do
+        task.wait(state.reconcileInterval)
+        if state.alive and (state.highlightsOn or state.healthOn) then
+            reconcileAll()
+        end
+    end
+end)
 
 function state.cleanup()
     if not state.alive then
