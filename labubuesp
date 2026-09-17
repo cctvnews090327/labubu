@@ -1,0 +1,522 @@
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+
+local localPlayer = Players.LocalPlayer
+local environment = (getgenv and getgenv()) or _G
+
+local previous = environment.BloxstrikeEnemyVision
+if type(previous) == "table" and type(previous.cleanup) == "function" then
+    pcall(previous.cleanup)
+end
+
+local state = {
+    alive = true,
+    highlightsOn = false,
+    healthOn = false,
+    connections = {},
+    watchers = {},
+    visuals = {},
+}
+environment.BloxstrikeEnemyVision = state
+
+local function create(className, parent, properties)
+    local instance = Instance.new(className)
+    for property, value in pairs(properties or {}) do
+        instance[property] = value
+    end
+    instance.Parent = parent
+    return instance
+end
+
+local function track(connection)
+    table.insert(state.connections, connection)
+    return connection
+end
+
+local function disconnect(connection)
+    if connection then
+        pcall(function()
+            connection:Disconnect()
+        end)
+    end
+end
+
+local function destroy(instance)
+    if instance then
+        pcall(function()
+            instance:Destroy()
+        end)
+    end
+end
+
+local function isEnemy(otherPlayer)
+    if otherPlayer == localPlayer then
+        return false
+    end
+    if localPlayer.Team == nil or otherPlayer.Team == nil then
+        return false
+    end
+    return otherPlayer.Team ~= localPlayer.Team
+end
+
+local function clearPlayer(otherPlayer)
+    local visual = state.visuals[otherPlayer]
+    if not visual then
+        return
+    end
+
+    disconnect(visual.healthChanged)
+    disconnect(visual.maxHealthChanged)
+    destroy(visual.highlight)
+    destroy(visual.billboard)
+    state.visuals[otherPlayer] = nil
+end
+
+local function makeHighlight(character)
+    return create("Highlight", character, {
+        Name = "EnemyVisionHighlight",
+        Adornee = character,
+        DepthMode = Enum.HighlightDepthMode.AlwaysOnTop,
+        FillColor = Color3.fromRGB(255, 55, 76),
+        FillTransparency = 0.52,
+        OutlineColor = Color3.fromRGB(255, 225, 230),
+        OutlineTransparency = 0,
+        Enabled = true,
+    })
+end
+
+local function makeHealthDisplay(otherPlayer, character, humanoid, head, visual)
+    local billboard = create("BillboardGui", character, {
+        Name = "EnemyVisionHealth",
+        Adornee = head,
+        AlwaysOnTop = true,
+        LightInfluence = 0,
+        MaxDistance = 2500,
+        Size = UDim2.fromOffset(164, 38),
+        StudsOffsetWorldSpace = Vector3.new(0, 3.25, 0),
+    })
+
+    local shell = create("Frame", billboard, {
+        Name = "Shell",
+        BackgroundColor3 = Color3.fromRGB(15, 18, 25),
+        BackgroundTransparency = 0.12,
+        BorderSizePixel = 0,
+        Size = UDim2.fromScale(1, 1),
+    })
+    create("UICorner", shell, { CornerRadius = UDim.new(0, 6) })
+    create("UIStroke", shell, {
+        Color = Color3.fromRGB(255, 68, 88),
+        Thickness = 1,
+        Transparency = 0.18,
+    })
+
+    local healthText = create("TextLabel", shell, {
+        Name = "HealthText",
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(6, 2),
+        Size = UDim2.new(1, -12, 0, 21),
+        Font = Enum.Font.GothamSemibold,
+        TextColor3 = Color3.fromRGB(247, 249, 255),
+        TextSize = 12,
+        TextStrokeTransparency = 0.72,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+    })
+
+    local barBack = create("Frame", shell, {
+        Name = "BarBack",
+        BackgroundColor3 = Color3.fromRGB(54, 60, 73),
+        BorderSizePixel = 0,
+        Position = UDim2.fromOffset(7, 27),
+        Size = UDim2.new(1, -14, 0, 5),
+    })
+    create("UICorner", barBack, { CornerRadius = UDim.new(1, 0) })
+    local healthFill = create("Frame", barBack, {
+        Name = "Fill",
+        BackgroundColor3 = Color3.fromRGB(65, 210, 120),
+        BorderSizePixel = 0,
+        Size = UDim2.fromScale(1, 1),
+    })
+    create("UICorner", healthFill, { CornerRadius = UDim.new(1, 0) })
+
+    local function updateHealth()
+        if not state.alive or not humanoid.Parent then
+            return
+        end
+        local maximum = math.max(humanoid.MaxHealth, 1)
+        local current = math.clamp(humanoid.Health, 0, maximum)
+        local ratio = current / maximum
+        healthText.Text = string.format(
+            "%s  —  %d/%d HP",
+            otherPlayer.DisplayName,
+            math.ceil(current),
+            math.ceil(maximum)
+        )
+        healthFill.Size = UDim2.fromScale(ratio, 1)
+        healthFill.BackgroundColor3 = Color3.fromRGB(
+            math.floor(235 - 170 * ratio),
+            math.floor(65 + 150 * ratio),
+            82
+        )
+    end
+
+    visual.billboard = billboard
+    visual.healthChanged = humanoid.HealthChanged:Connect(updateHealth)
+    visual.maxHealthChanged = humanoid:GetPropertyChangedSignal("MaxHealth"):Connect(updateHealth)
+    updateHealth()
+end
+
+local function reconcilePlayer(otherPlayer)
+    if not state.alive then
+        return
+    end
+
+    local character = otherPlayer.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    local head = character and character:FindFirstChild("Head")
+    if not isEnemy(otherPlayer) or not character or not humanoid or not head or humanoid.Health <= 0 then
+        clearPlayer(otherPlayer)
+        return
+    end
+
+    local visual = state.visuals[otherPlayer]
+    if visual and visual.character ~= character then
+        clearPlayer(otherPlayer)
+        visual = nil
+    end
+    if not visual then
+        visual = { character = character }
+        state.visuals[otherPlayer] = visual
+    end
+
+    if state.highlightsOn then
+        if not visual.highlight or not visual.highlight.Parent then
+            visual.highlight = makeHighlight(character)
+        end
+    else
+        destroy(visual.highlight)
+        visual.highlight = nil
+    end
+
+    if state.healthOn then
+        if not visual.billboard or not visual.billboard.Parent then
+            disconnect(visual.healthChanged)
+            disconnect(visual.maxHealthChanged)
+            visual.healthChanged = nil
+            visual.maxHealthChanged = nil
+            makeHealthDisplay(otherPlayer, character, humanoid, head, visual)
+        end
+    else
+        disconnect(visual.healthChanged)
+        disconnect(visual.maxHealthChanged)
+        visual.healthChanged = nil
+        visual.maxHealthChanged = nil
+        destroy(visual.billboard)
+        visual.billboard = nil
+    end
+
+    if not state.highlightsOn and not state.healthOn then
+        state.visuals[otherPlayer] = nil
+    end
+end
+
+local function reconcileAll()
+    for _, otherPlayer in ipairs(Players:GetPlayers()) do
+        reconcilePlayer(otherPlayer)
+    end
+end
+
+local function unwatchPlayer(otherPlayer)
+    local connections = state.watchers[otherPlayer]
+    if connections then
+        for _, connection in ipairs(connections) do
+            disconnect(connection)
+        end
+        state.watchers[otherPlayer] = nil
+    end
+    clearPlayer(otherPlayer)
+end
+
+local function watchPlayer(otherPlayer)
+    unwatchPlayer(otherPlayer)
+    local connections = {}
+    state.watchers[otherPlayer] = connections
+
+    table.insert(connections, otherPlayer.CharacterAdded:Connect(function()
+        task.defer(function()
+            if state.alive then
+                reconcilePlayer(otherPlayer)
+            end
+        end)
+    end))
+    table.insert(connections, otherPlayer.CharacterRemoving:Connect(function()
+        clearPlayer(otherPlayer)
+    end))
+    table.insert(connections, otherPlayer:GetPropertyChangedSignal("Team"):Connect(function()
+        if otherPlayer == localPlayer then
+            reconcileAll()
+        else
+            reconcilePlayer(otherPlayer)
+        end
+    end))
+
+    reconcilePlayer(otherPlayer)
+end
+
+local playerGui = localPlayer:WaitForChild("PlayerGui")
+local oldGui = playerGui:FindFirstChild("EnemyVisionUI")
+if oldGui then
+    oldGui:Destroy()
+end
+
+local gui = create("ScreenGui", playerGui, {
+    Name = "EnemyVisionUI",
+    ResetOnSpawn = false,
+    IgnoreGuiInset = false,
+    DisplayOrder = 10000,
+    ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+})
+
+local panel = create("Frame", gui, {
+    Name = "Panel",
+    Active = true,
+    BackgroundColor3 = Color3.fromRGB(23, 28, 39),
+    BorderSizePixel = 0,
+    Position = UDim2.new(0, 24, 0.5, -77),
+    Size = UDim2.fromOffset(286, 154),
+})
+create("UICorner", panel, { CornerRadius = UDim.new(0, 13) })
+create("UIStroke", panel, {
+    Color = Color3.fromRGB(48, 59, 81),
+    Thickness = 1,
+    Transparency = 0.1,
+})
+
+local header = create("Frame", panel, {
+    Name = "Header",
+    Active = true,
+    BackgroundColor3 = Color3.fromRGB(32, 39, 54),
+    BorderSizePixel = 0,
+    Size = UDim2.new(1, 0, 0, 42),
+})
+create("UICorner", header, { CornerRadius = UDim.new(0, 13) })
+create("Frame", header, {
+    Name = "CornerMask",
+    BackgroundColor3 = Color3.fromRGB(32, 39, 54),
+    BorderSizePixel = 0,
+    Position = UDim2.new(0, 0, 1, -13),
+    Size = UDim2.new(1, 0, 0, 13),
+})
+create("TextLabel", header, {
+    Name = "Title",
+    BackgroundTransparency = 1,
+    Position = UDim2.fromOffset(14, 0),
+    Size = UDim2.new(1, -62, 1, 0),
+    Font = Enum.Font.GothamBold,
+    Text = "ENEMY VISION",
+    TextColor3 = Color3.fromRGB(243, 247, 255),
+    TextSize = 14,
+    TextXAlignment = Enum.TextXAlignment.Left,
+})
+
+local minimizeButton = create("TextButton", header, {
+    Name = "Minimize",
+    AnchorPoint = Vector2.new(1, 0.5),
+    BackgroundColor3 = Color3.fromRGB(45, 54, 72),
+    BorderSizePixel = 0,
+    Position = UDim2.new(1, -9, 0.5, 0),
+    Size = UDim2.fromOffset(34, 26),
+    AutoButtonColor = true,
+    Font = Enum.Font.GothamBold,
+    Text = "—",
+    TextColor3 = Color3.fromRGB(171, 184, 207),
+    TextSize = 17,
+})
+create("UICorner", minimizeButton, { CornerRadius = UDim.new(0, 7) })
+
+local function makeToggle(name, labelText, y)
+    local button = create("TextButton", panel, {
+        Name = name,
+        BackgroundColor3 = Color3.fromRGB(17, 23, 34),
+        BorderSizePixel = 0,
+        Position = UDim2.fromOffset(12, y),
+        Size = UDim2.new(1, -24, 0, 43),
+        AutoButtonColor = false,
+        Text = "",
+    })
+    create("UICorner", button, { CornerRadius = UDim.new(0, 9) })
+    create("TextLabel", button, {
+        Name = "Label",
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(12, 0),
+        Size = UDim2.new(1, -82, 1, 0),
+        Font = Enum.Font.GothamMedium,
+        Text = labelText,
+        TextColor3 = Color3.fromRGB(232, 237, 247),
+        TextSize = 13,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    })
+    local status = create("TextLabel", button, {
+        Name = "Status",
+        AnchorPoint = Vector2.new(1, 0.5),
+        BackgroundColor3 = Color3.fromRGB(100, 112, 135),
+        BorderSizePixel = 0,
+        Position = UDim2.new(1, -10, 0.5, 0),
+        Size = UDim2.fromOffset(48, 24),
+        Font = Enum.Font.GothamBold,
+        Text = "OFF",
+        TextColor3 = Color3.fromRGB(255, 255, 255),
+        TextSize = 11,
+    })
+    create("UICorner", status, { CornerRadius = UDim.new(1, 0) })
+    return button, status
+end
+
+local highlightToggle, highlightStatus = makeToggle("HighlightToggle", "Highlight enemies", 52)
+local healthToggle, healthStatus = makeToggle("HealthToggle", "Show enemy health", 101)
+
+local minimizedButton = create("TextButton", gui, {
+    Name = "minimizedButton",
+    AnchorPoint = Vector2.new(0, 0.5),
+    BackgroundColor3 = Color3.fromRGB(32, 39, 54),
+    BorderSizePixel = 0,
+    Position = UDim2.new(0, 0, 0.5, 0),
+    Size = UDim2.fromOffset(46, 46),
+    Visible = false,
+    AutoButtonColor = true,
+    Font = Enum.Font.GothamBlack,
+    Text = "EV",
+    TextColor3 = Color3.fromRGB(255, 100, 122),
+    TextSize = 14,
+})
+create("UICorner", minimizedButton, { CornerRadius = UDim.new(0, 10) })
+create("UIStroke", minimizedButton, {
+    Color = Color3.fromRGB(255, 82, 105),
+    Thickness = 1,
+    Transparency = 0.18,
+})
+
+local function paintToggle(statusLabel, enabled)
+    statusLabel.Text = enabled and "ON" or "OFF"
+    statusLabel.BackgroundColor3 = enabled
+        and Color3.fromRGB(38, 181, 111)
+        or Color3.fromRGB(100, 112, 135)
+end
+
+track(highlightToggle.Activated:Connect(function()
+    state.highlightsOn = not state.highlightsOn
+    paintToggle(highlightStatus, state.highlightsOn)
+    reconcileAll()
+end))
+
+track(healthToggle.Activated:Connect(function()
+    state.healthOn = not state.healthOn
+    paintToggle(healthStatus, state.healthOn)
+    reconcileAll()
+end))
+
+local function clampedPanelPosition(position)
+    local camera = Workspace.CurrentCamera
+    local viewport = camera and camera.ViewportSize or Vector2.new(1920, 1080)
+    local width = panel.AbsoluteSize.X > 0 and panel.AbsoluteSize.X or 286
+    local height = panel.AbsoluteSize.Y > 0 and panel.AbsoluteSize.Y or 154
+    local x = math.clamp(position.X.Offset, 0, math.max(0, viewport.X - width))
+    local y = math.clamp(position.Y.Offset, 0, math.max(0, viewport.Y - height))
+    return UDim2.fromOffset(x, y)
+end
+
+local dragging = false
+local dragInput
+local dragStart
+local startPosition
+
+track(header.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPosition = UDim2.fromOffset(panel.AbsolutePosition.X, panel.AbsolutePosition.Y)
+        dragInput = input
+    end
+end))
+
+track(header.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement
+        or input.UserInputType == Enum.UserInputType.Touch then
+        dragInput = input
+    end
+end))
+
+track(UserInputService.InputChanged:Connect(function(input)
+    if dragging and input == dragInput and dragStart and startPosition then
+        local delta = input.Position - dragStart
+        panel.Position = clampedPanelPosition(UDim2.fromOffset(
+            startPosition.X.Offset + delta.X,
+            startPosition.Y.Offset + delta.Y
+        ))
+    end
+end))
+
+track(UserInputService.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = false
+        dragInput = nil
+    end
+end))
+
+track(minimizeButton.Activated:Connect(function()
+    panel.Visible = false
+    minimizedButton.Visible = true
+end))
+
+track(minimizedButton.Activated:Connect(function()
+    panel.Position = clampedPanelPosition(UDim2.fromOffset(
+        panel.AbsolutePosition.X,
+        panel.AbsolutePosition.Y
+    ))
+    minimizedButton.Visible = false
+    panel.Visible = true
+end))
+
+track(Players.PlayerAdded:Connect(watchPlayer))
+track(Players.PlayerRemoving:Connect(unwatchPlayer))
+
+for _, otherPlayer in ipairs(Players:GetPlayers()) do
+    watchPlayer(otherPlayer)
+end
+
+function state.cleanup()
+    if not state.alive then
+        return
+    end
+    state.alive = false
+
+    for _, connection in ipairs(state.connections) do
+        disconnect(connection)
+    end
+    table.clear(state.connections)
+
+    local watchedPlayers = {}
+    for watchedPlayer in pairs(state.watchers) do
+        table.insert(watchedPlayers, watchedPlayer)
+    end
+    for _, watchedPlayer in ipairs(watchedPlayers) do
+        unwatchPlayer(watchedPlayer)
+    end
+
+    local visualPlayers = {}
+    for visualPlayer in pairs(state.visuals) do
+        table.insert(visualPlayers, visualPlayer)
+    end
+    for _, visualPlayer in ipairs(visualPlayers) do
+        clearPlayer(visualPlayer)
+    end
+
+    destroy(gui)
+    if environment.BloxstrikeEnemyVision == state then
+        environment.BloxstrikeEnemyVision = nil
+    end
+end
+
+reconcileAll()
