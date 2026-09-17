@@ -50,14 +50,30 @@ local function destroy(instance)
     end
 end
 
+local function getCombatTeam(player)
+    return player.Team or player:GetAttribute("Team")
+end
+
+local function readCombatHealth(character, humanoid)
+    if humanoid then
+        return humanoid.Health, humanoid.MaxHealth
+    end
+
+    local current = tonumber(character:GetAttribute("Health")) or 0
+    local maximum = tonumber(character:GetAttribute("MaxHealth")) or 100
+    return current, math.max(maximum, 1)
+end
+
 local function isEnemy(otherPlayer)
     if otherPlayer == localPlayer then
         return false
     end
-    if localPlayer.Team == nil or otherPlayer.Team == nil then
+    local localTeam = getCombatTeam(localPlayer)
+    local otherTeam = getCombatTeam(otherPlayer)
+    if localTeam == nil or otherTeam == nil then
         return false
     end
-    return otherPlayer.Team ~= localPlayer.Team
+    return otherTeam ~= localTeam
 end
 
 local function clearPlayer(otherPlayer)
@@ -140,11 +156,12 @@ local function makeHealthDisplay(otherPlayer, character, humanoid, head, visual)
     create("UICorner", healthFill, { CornerRadius = UDim.new(1, 0) })
 
     local function updateHealth()
-        if not state.alive or not humanoid.Parent then
+        if not state.alive or not character.Parent then
             return
         end
-        local maximum = math.max(humanoid.MaxHealth, 1)
-        local current = math.clamp(humanoid.Health, 0, maximum)
+        local rawCurrent, rawMaximum = readCombatHealth(character, humanoid)
+        local maximum = math.max(rawMaximum, 1)
+        local current = math.clamp(rawCurrent, 0, maximum)
         local ratio = current / maximum
         healthText.Text = string.format(
             "%s  —  %d/%d HP",
@@ -161,8 +178,13 @@ local function makeHealthDisplay(otherPlayer, character, humanoid, head, visual)
     end
 
     visual.billboard = billboard
-    visual.healthChanged = humanoid.HealthChanged:Connect(updateHealth)
-    visual.maxHealthChanged = humanoid:GetPropertyChangedSignal("MaxHealth"):Connect(updateHealth)
+    if humanoid then
+        visual.healthChanged = humanoid.HealthChanged:Connect(updateHealth)
+        visual.maxHealthChanged = humanoid:GetPropertyChangedSignal("MaxHealth"):Connect(updateHealth)
+    else
+        visual.healthChanged = character:GetAttributeChangedSignal("Health"):Connect(updateHealth)
+        visual.maxHealthChanged = character:GetAttributeChangedSignal("MaxHealth"):Connect(updateHealth)
+    end
     updateHealth()
 end
 
@@ -174,7 +196,7 @@ local function reconcilePlayer(otherPlayer)
     local character = otherPlayer.Character
     local humanoid = character and character:FindFirstChildOfClass("Humanoid")
     local head = character and character:FindFirstChild("Head")
-    if not isEnemy(otherPlayer) or not character or not humanoid or not head or humanoid.Health <= 0 then
+    if not isEnemy(otherPlayer) or not character or not head then
         clearPlayer(otherPlayer)
         return
     end
@@ -253,6 +275,13 @@ local function watchPlayer(otherPlayer)
         clearPlayer(otherPlayer)
     end))
     table.insert(connections, otherPlayer:GetPropertyChangedSignal("Team"):Connect(function()
+        if otherPlayer == localPlayer then
+            reconcileAll()
+        else
+            reconcilePlayer(otherPlayer)
+        end
+    end))
+    table.insert(connections, otherPlayer:GetAttributeChangedSignal("Team"):Connect(function()
         if otherPlayer == localPlayer then
             reconcileAll()
         else
